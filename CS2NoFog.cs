@@ -12,7 +12,7 @@ namespace CS2NoFog;
 public class CS2NoFogPlugin : BasePlugin
 {
     public override string ModuleName => "CS2-NoFog";
-    public override string ModuleVersion => "1.3.0";
+    public override string ModuleVersion => "1.4.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Removes fog on any map when an admin types !nofog in chat.";
 
@@ -20,9 +20,10 @@ public class CS2NoFogPlugin : BasePlugin
 
     private static readonly string ChatPrefix = $" {ChatColors.Green}[NoFog]{ChatColors.Default}";
 
-    private static readonly string[] FogEntityNames =
+    // Deleted outright; this reliably clears their fog on clients. env_fog_controller
+    // is intentionally NOT in this list - see RemoveFog.
+    private static readonly string[] DeletedFogEntityNames =
     {
-        "env_fog_controller",
         "env_gradient_fog",
         "env_cubemap_fog",
         "env_player_visibility",
@@ -68,19 +69,11 @@ public class CS2NoFogPlugin : BasePlugin
 
     private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
     {
-        // Late joiners (and respawns) get a fresh pawn whose fog params point at
-        // whatever controller the engine picked; rebind them to ours.
+        // Fresh pawns get fog params from the map controller's original state;
+        // re-push the no-fog params to everyone.
         if (_noFogEnabled)
         {
-            Server.NextFrame(() =>
-            {
-                var replacement = FindReplacementController();
-                if (replacement != null)
-                {
-                    foreach (var pawn in AlivePlayerPawns())
-                        BindPlayerFog(pawn, replacement);
-                }
-            });
+            Server.NextFrame(ApplyPlayerFogParams);
         }
 
         return HookResult.Continue;
@@ -93,20 +86,38 @@ public class CS2NoFogPlugin : BasePlugin
 
     private void RemoveFog()
     {
-        // Deleting the fog entities is what actually clears fog on the client -
-        // disabling them in place does not reliably replicate. But the map's
-        // env_fog_controller also owns the far-Z clip plane (draw distance), and
-        // deleting it makes the engine fall back to a close default plane where
-        // everything renders black. So: delete the map's fog entities, then spawn
-        // our own fog-disabled env_fog_controller with a huge far-Z and bind every
-        // player's fog params to it.
-        foreach (var designerName in FogEntityNames)
+        foreach (var designerName in DeletedFogEntityNames)
         {
             foreach (var entity in Utilities.FindAllEntitiesByDesignerName<CBaseEntity>(designerName))
             {
                 if (entity.IsValid)
                     entity.Remove();
             }
+        }
+
+        // env_fog_controller must stay alive: it owns the far-Z clip plane, and the
+        // engine only honors far-Z while fog is ENABLED (with it disabled or the
+        // entity deleted, the client clips at a close default plane and renders
+        // black beyond it). So keep fog turned ON but invisible - density zero,
+        // start/end pushed out - and push far-Z out to ~10M units. Driving this
+        // through entity inputs makes the game propagate the change to clients the
+        // same way map I/O would, instead of relying on raw field replication.
+        var controller = FindOrCreateFogController();
+        if (controller != null)
+        {
+            controller.AcceptInput("TurnOn");
+            controller.AcceptInput("SetMaxDensity", null, null, "0");
+            controller.AcceptInput("SetStartDist", null, null, FarPlane.ToString("F0"));
+            controller.AcceptInput("SetEndDist", null, null, FarPlane.ToString("F0"));
+            controller.AcceptInput("SetFarZ", null, null, FarPlane.ToString("F0"));
+
+            // Belt and braces: mirror the same values onto the networked struct.
+            controller.Fog.Enable = true;
+            controller.Fog.Start = FarPlane;
+            controller.Fog.End = FarPlane;
+            controller.Fog.Maxdensity = 0f;
+            controller.Fog.Farz = FarPlane;
+            Utilities.SetStateChanged(controller, "CFogController", "m_fog");
         }
 
         // The 3D skybox fog lives on sky_camera; killing that entity would remove
@@ -124,78 +135,61 @@ public class CS2NoFogPlugin : BasePlugin
             Utilities.SetStateChanged(sky, "CSkyCamera", "m_skyboxData");
         }
 
-        Server.NextFrame(() =>
-        {
-            var replacement = FindReplacementController() ?? SpawnReplacementController();
-            if (replacement == null)
-                return;
-
-            foreach (var pawn in AlivePlayerPawns())
-                BindPlayerFog(pawn, replacement);
-        });
+        Server.NextFrame(ApplyPlayerFogParams);
     }
 
-    private static CFogController? FindReplacementController()
+    private static CFogController? FindOrCreateFogController()
     {
         foreach (var fog in Utilities.FindAllEntitiesByDesignerName<CFogController>("env_fog_controller"))
         {
-            if (fog.IsValid && fog.Entity?.Name == "nofog_controller")
+            if (fog.IsValid)
                 return fog;
         }
 
-        return null;
-    }
-
-    private static CFogController? SpawnReplacementController()
-    {
-        var fog = Utilities.CreateEntityByName<CFogController>("env_fog_controller");
-        if (fog == null || !fog.IsValid)
+        var spawned = Utilities.CreateEntityByName<CFogController>("env_fog_controller");
+        if (spawned == null || !spawned.IsValid)
             return null;
 
-        fog.Entity!.Name = "nofog_controller";
-        ConfigureNoFogParams(fog);
-        fog.DispatchSpawn();
-        ConfigureNoFogParams(fog);
-        Utilities.SetStateChanged(fog, "CFogController", "m_fog");
-        return fog;
+        spawned.DispatchSpawn();
+        return spawned;
     }
 
-    private static void ConfigureNoFogParams(CFogController fog)
+    private static void ApplyPlayerFogParams()
     {
-        fog.Fog.Enable = false;
-        fog.Fog.Start = FarPlane;
-        fog.Fog.End = FarPlane;
-        fog.Fog.Maxdensity = 0f;
-        fog.Fog.Farz = FarPlane;
-    }
+        var controller = default(CFogController);
+        foreach (var fog in Utilities.FindAllEntitiesByDesignerName<CFogController>("env_fog_controller"))
+        {
+            if (fog.IsValid)
+            {
+                controller = fog;
+                break;
+            }
+        }
 
-    private static IEnumerable<CBasePlayerPawn> AlivePlayerPawns()
-    {
         foreach (var player in Utilities.GetPlayers())
         {
-            if (player.IsValid && !player.IsHLTV && player.Pawn.Value is { IsValid: true } pawn)
-                yield return pawn;
+            if (!player.IsValid || player.IsHLTV || player.Pawn.Value is not { IsValid: true } pawn)
+                continue;
+
+            var camera = pawn.CameraServices;
+            if (camera == null)
+                continue;
+
+            // Force both ends of the client's fog lerp to "invisible fog, huge
+            // far plane" so nothing lingers from the map's original settings.
+            var playerFog = camera.PlayerFog;
+            if (controller != null)
+                playerFog.Ctrl.Raw = controller.EntityHandle.Raw;
+            playerFog.TransitionTime = 0f;
+            playerFog.OldFarZ = FarPlane;
+            playerFog.NewFarZ = FarPlane;
+            playerFog.OldMaxDensity = 0f;
+            playerFog.NewMaxDensity = 0f;
+            playerFog.OldStart = FarPlane;
+            playerFog.NewStart = FarPlane;
+            playerFog.OldEnd = FarPlane;
+            playerFog.NewEnd = FarPlane;
+            Utilities.SetStateChanged(pawn, "CBasePlayerPawn", "m_pCameraServices");
         }
-    }
-
-    private static void BindPlayerFog(CBasePlayerPawn pawn, CFogController fog)
-    {
-        var camera = pawn.CameraServices;
-        if (camera == null)
-            return;
-
-        var playerFog = camera.PlayerFog;
-        playerFog.Ctrl.Raw = fog.EntityHandle.Raw;
-        // Force both ends of the fog lerp to "no fog, huge far plane" so nothing
-        // lingers from the deleted map controller.
-        playerFog.OldFarZ = FarPlane;
-        playerFog.NewFarZ = FarPlane;
-        playerFog.OldMaxDensity = 0f;
-        playerFog.NewMaxDensity = 0f;
-        playerFog.OldStart = FarPlane;
-        playerFog.NewStart = FarPlane;
-        playerFog.OldEnd = FarPlane;
-        playerFog.NewEnd = FarPlane;
-        Utilities.SetStateChanged(pawn, "CBasePlayerPawn", "m_pCameraServices");
     }
 }

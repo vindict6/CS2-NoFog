@@ -12,19 +12,21 @@ namespace CS2NoFog;
 public class CS2NoFogPlugin : BasePlugin
 {
     public override string ModuleName => "CS2-NoFog";
-    public override string ModuleVersion => "1.0.0";
+    public override string ModuleVersion => "1.1.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Removes fog on any map when an admin types !nofog in chat.";
 
     private static readonly string ChatPrefix = $" {ChatColors.Green}[NoFog]{ChatColors.Default}";
 
+    private static readonly string[] FogEntityNames =
+    {
+        "env_fog_controller",
+        "env_gradient_fog",
+        "env_cubemap_fog",
+        "env_player_visibility",
+    };
+
     private bool _noFogEnabled;
-
-    private readonly Dictionary<uint, FogControllerState> _savedFogControllers = new();
-    private readonly Dictionary<uint, bool> _savedGradientFog = new();
-    private readonly Dictionary<uint, bool> _savedCubemapFog = new();
-
-    private sealed record FogControllerState(bool Enable, float Start, float End, float MaxDensity);
 
     public override void Load(bool hotReload)
     {
@@ -42,18 +44,17 @@ public class CS2NoFogPlugin : BasePlugin
         if (_noFogEnabled)
         {
             RemoveFog();
-            command.ReplyToCommand($"{ChatPrefix} Fog has been removed on this map.");
+            command.ReplyToCommand($"{ChatPrefix} Fog entities have been removed on this map.");
         }
         else
         {
-            RestoreFog();
-            command.ReplyToCommand($"{ChatPrefix} Fog has been restored to map defaults.");
+            command.ReplyToCommand($"{ChatPrefix} Fog removal disabled. Fog returns next round restart.");
         }
     }
 
     private HookResult OnRoundStart(EventRoundStart @event, GameEventInfo info)
     {
-        // Round restarts reset entity state, so re-apply once entities have settled.
+        // Round restarts respawn map entities, so re-apply once entities have settled.
         if (_noFogEnabled)
         {
             Server.NextFrame(RemoveFog);
@@ -65,93 +66,32 @@ public class CS2NoFogPlugin : BasePlugin
     private void OnMapEnd()
     {
         _noFogEnabled = false;
-        ClearSavedState();
     }
 
     private void RemoveFog()
     {
-        foreach (var fog in Utilities.FindAllEntitiesByDesignerName<CFogController>("env_fog_controller"))
+        foreach (var designerName in FogEntityNames)
         {
-            if (!fog.IsValid)
-                continue;
-
-            if (!_savedFogControllers.ContainsKey(fog.Index))
+            foreach (var entity in Utilities.FindAllEntitiesByDesignerName<CBaseEntity>(designerName))
             {
-                _savedFogControllers[fog.Index] =
-                    new FogControllerState(fog.Fog.Enable, fog.Fog.Start, fog.Fog.End, fog.Fog.Maxdensity);
+                if (entity.IsValid)
+                    entity.Remove();
             }
-
-            fog.Fog.Enable = false;
-            fog.Fog.Start = 100000f;
-            fog.Fog.End = 200000f;
-            fog.Fog.Maxdensity = 0f;
-            Utilities.SetStateChanged(fog, "CFogController", "m_fog");
         }
 
-        foreach (var gradient in Utilities.FindAllEntitiesByDesignerName<CGradientFog>("env_gradient_fog"))
+        // The 3D skybox fog lives on sky_camera; killing that entity would remove
+        // the entire skybox, so zero out its fog parameters instead.
+        foreach (var sky in Utilities.FindAllEntitiesByDesignerName<CSkyCamera>("sky_camera"))
         {
-            if (!gradient.IsValid)
+            if (!sky.IsValid)
                 continue;
 
-            if (!_savedGradientFog.ContainsKey(gradient.Index))
-                _savedGradientFog[gradient.Index] = gradient.IsEnabled;
-
-            gradient.IsEnabled = false;
-            Utilities.SetStateChanged(gradient, "CGradientFog", "m_bIsEnabled");
+            var fog = sky.SkyboxData.Fog;
+            fog.Enable = false;
+            fog.Maxdensity = 0f;
+            fog.Start = 100000f;
+            fog.End = 200000f;
+            Utilities.SetStateChanged(sky, "CSkyCamera", "m_skyboxData");
         }
-
-        foreach (var cubemap in Utilities.FindAllEntitiesByDesignerName<CEnvCubemapFog>("env_cubemap_fog"))
-        {
-            if (!cubemap.IsValid)
-                continue;
-
-            if (!_savedCubemapFog.ContainsKey(cubemap.Index))
-                _savedCubemapFog[cubemap.Index] = cubemap.Active;
-
-            cubemap.Active = false;
-            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_bActive");
-        }
-    }
-
-    private void RestoreFog()
-    {
-        foreach (var fog in Utilities.FindAllEntitiesByDesignerName<CFogController>("env_fog_controller"))
-        {
-            if (!fog.IsValid || !_savedFogControllers.TryGetValue(fog.Index, out var saved))
-                continue;
-
-            fog.Fog.Enable = saved.Enable;
-            fog.Fog.Start = saved.Start;
-            fog.Fog.End = saved.End;
-            fog.Fog.Maxdensity = saved.MaxDensity;
-            Utilities.SetStateChanged(fog, "CFogController", "m_fog");
-        }
-
-        foreach (var gradient in Utilities.FindAllEntitiesByDesignerName<CGradientFog>("env_gradient_fog"))
-        {
-            if (!gradient.IsValid || !_savedGradientFog.TryGetValue(gradient.Index, out var enabled))
-                continue;
-
-            gradient.IsEnabled = enabled;
-            Utilities.SetStateChanged(gradient, "CGradientFog", "m_bIsEnabled");
-        }
-
-        foreach (var cubemap in Utilities.FindAllEntitiesByDesignerName<CEnvCubemapFog>("env_cubemap_fog"))
-        {
-            if (!cubemap.IsValid || !_savedCubemapFog.TryGetValue(cubemap.Index, out var active))
-                continue;
-
-            cubemap.Active = active;
-            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_bActive");
-        }
-
-        ClearSavedState();
-    }
-
-    private void ClearSavedState()
-    {
-        _savedFogControllers.Clear();
-        _savedGradientFog.Clear();
-        _savedCubemapFog.Clear();
     }
 }

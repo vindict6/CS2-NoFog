@@ -13,11 +13,20 @@ namespace CS2NoFog;
 public class CS2NoFogPlugin : BasePlugin
 {
     public override string ModuleName => "CS2-NoFog";
-    public override string ModuleVersion => "1.6.0";
+    public override string ModuleVersion => "1.7.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Removes fog on any map when an admin types !nofog in chat.";
 
     private const float FarPlane = 9999999f;
+
+    // Cubemap fog cannot be turned off (opacity 0 leaves skybox props like cloud
+    // models rendering solid black - their look depends on being seen through
+    // this fog). Instead its distance ramp is pushed past the longest possible
+    // in-map sightline (~19.6k units on cs_insertion2) so playable space is
+    // fog-free, while 3D-skybox geometry - drawn at skybox-scale distances well
+    // beyond that - stays fogged exactly like the original map.
+    private const float CubemapFogStart = 20000f;
+    private const float CubemapFogEnd = 24000f;
 
     private static readonly string ChatPrefix = $" {ChatColors.Green}[NoFog]{ChatColors.Default}";
 
@@ -37,11 +46,12 @@ public class CS2NoFogPlugin : BasePlugin
 
     private readonly Dictionary<uint, FogControllerState> _savedFogControllers = new();
     private readonly Dictionary<uint, GradientFogState> _savedGradientFog = new();
-    private readonly Dictionary<uint, float> _savedCubemapFogOpacity = new();
+    private readonly Dictionary<uint, CubemapFogState> _savedCubemapFog = new();
     private readonly Dictionary<uint, PlayerVisibilityState> _savedPlayerVisibility = new();
 
     private sealed record FogControllerState(bool Enable, float Start, float End, float Maxdensity, float Farz, float SkyboxFogFactor);
     private sealed record GradientFogState(bool Enabled, float FogMaxOpacity);
+    private sealed record CubemapFogState(float StartDistance, float EndDistance);
     private sealed record PlayerVisibilityState(bool Enabled, float VisibilityStrength, float FogDistanceMultiplier, float FogMaxDensityMultiplier);
 
     public override void Load(bool hotReload)
@@ -91,8 +101,9 @@ public class CS2NoFogPlugin : BasePlugin
     //    to black at a close default plane.
     //  - Deleting env_cubemap_fog (or setting it inactive) leaves the client's
     //    cubemap fog pass running with no texture source, which renders as solid
-    //    BLACK - the black wall at a fixed distance, and the black sky. Its one
-    //    safe off-switch is FogMaxOpacity = 0 with the entity left fully intact.
+    //    BLACK - the black wall at a fixed distance, and the black sky. Zeroing
+    //    its opacity blacks out skybox props instead (see CubemapFogStart), so
+    //    the entity is kept fully active and only its distance ramp is moved.
     // Everything is neutralized in place with per-field dirty marking so the
     // changes actually reach clients.
     private void RemoveFog()
@@ -139,11 +150,13 @@ public class CS2NoFogPlugin : BasePlugin
             if (!cubemap.IsValid)
                 continue;
 
-            if (!_savedCubemapFogOpacity.ContainsKey(cubemap.Index))
-                _savedCubemapFogOpacity[cubemap.Index] = cubemap.FogMaxOpacity;
+            if (!_savedCubemapFog.ContainsKey(cubemap.Index))
+                _savedCubemapFog[cubemap.Index] = new CubemapFogState(cubemap.StartDistance, cubemap.EndDistance);
 
-            cubemap.FogMaxOpacity = 0f;
-            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_flFogMaxOpacity");
+            cubemap.StartDistance = CubemapFogStart;
+            cubemap.EndDistance = CubemapFogEnd;
+            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_flStartDistance");
+            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_flEndDistance");
         }
 
         foreach (var visibility in Utilities.FindAllEntitiesByDesignerName<CPlayerVisibility>("env_player_visibility"))
@@ -203,11 +216,13 @@ public class CS2NoFogPlugin : BasePlugin
 
         foreach (var cubemap in Utilities.FindAllEntitiesByDesignerName<CEnvCubemapFog>("env_cubemap_fog"))
         {
-            if (!cubemap.IsValid || !_savedCubemapFogOpacity.TryGetValue(cubemap.Index, out var opacity))
+            if (!cubemap.IsValid || !_savedCubemapFog.TryGetValue(cubemap.Index, out var saved))
                 continue;
 
-            cubemap.FogMaxOpacity = opacity;
-            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_flFogMaxOpacity");
+            cubemap.StartDistance = saved.StartDistance;
+            cubemap.EndDistance = saved.EndDistance;
+            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_flStartDistance");
+            Utilities.SetStateChanged(cubemap, "CEnvCubemapFog", "m_flEndDistance");
         }
 
         foreach (var visibility in Utilities.FindAllEntitiesByDesignerName<CPlayerVisibility>("env_player_visibility"))
@@ -249,7 +264,7 @@ public class CS2NoFogPlugin : BasePlugin
     {
         _savedFogControllers.Clear();
         _savedGradientFog.Clear();
-        _savedCubemapFogOpacity.Clear();
+        _savedCubemapFog.Clear();
         _savedPlayerVisibility.Clear();
     }
 }

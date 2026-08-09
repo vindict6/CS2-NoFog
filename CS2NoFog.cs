@@ -13,7 +13,7 @@ namespace CS2NoFog;
 public class CS2NoFogPlugin : BasePlugin
 {
     public override string ModuleName => "CS2-NoFog";
-    public override string ModuleVersion => "1.5.0";
+    public override string ModuleVersion => "1.6.0";
     public override string ModuleAuthor => "vindict6";
     public override string ModuleDescription => "Removes fog on any map when an admin types !nofog in chat.";
 
@@ -39,12 +39,10 @@ public class CS2NoFogPlugin : BasePlugin
     private readonly Dictionary<uint, GradientFogState> _savedGradientFog = new();
     private readonly Dictionary<uint, float> _savedCubemapFogOpacity = new();
     private readonly Dictionary<uint, PlayerVisibilityState> _savedPlayerVisibility = new();
-    private readonly Dictionary<uint, SkyCameraFogState> _savedSkyCameraFog = new();
 
     private sealed record FogControllerState(bool Enable, float Start, float End, float Maxdensity, float Farz, float SkyboxFogFactor);
     private sealed record GradientFogState(bool Enabled, float FogMaxOpacity);
     private sealed record PlayerVisibilityState(bool Enabled, float VisibilityStrength, float FogDistanceMultiplier, float FogMaxDensityMultiplier);
-    private sealed record SkyCameraFogState(bool Enable, float Start, float End, float Maxdensity, float SkyboxFogFactor);
 
     public override void Load(bool hotReload)
     {
@@ -170,29 +168,10 @@ public class CS2NoFogPlugin : BasePlugin
             Utilities.SetStateChanged(visibility, "CPlayerVisibility", "m_flFogMaxDensityMultiplier");
         }
 
-        // The 3D skybox fog lives on sky_camera. Each pawn's networked skybox
-        // params are refreshed from this entity every tick, so neutralizing the
-        // source covers all players automatically.
-        foreach (var sky in Utilities.FindAllEntitiesByDesignerName<CSkyCamera>("sky_camera"))
-        {
-            if (!sky.IsValid)
-                continue;
-
-            var fog = sky.SkyboxData.Fog;
-
-            if (!_savedSkyCameraFog.ContainsKey(sky.Index))
-            {
-                _savedSkyCameraFog[sky.Index] = new SkyCameraFogState(
-                    fog.Enable, fog.Start, fog.End, fog.Maxdensity, GetSkyboxFogFactor(fog));
-            }
-
-            fog.Enable = false;
-            fog.Maxdensity = 0f;
-            fog.Start = FarPlane;
-            fog.End = FarPlane;
-            SetSkyboxFogFactor(fog, 0f);
-            MarkSkyCameraFogChanged(sky);
-        }
+        // sky_camera's 3D-skybox fog is deliberately left untouched: skybox prop
+        // materials (e.g. clouds) are authored to blend into that fog, and zeroing
+        // it makes them render as solid black. It only tints the skybox backdrop
+        // and has no effect on in-map visibility.
     }
 
     private void RestoreFog()
@@ -246,20 +225,6 @@ public class CS2NoFogPlugin : BasePlugin
             Utilities.SetStateChanged(visibility, "CPlayerVisibility", "m_flFogMaxDensityMultiplier");
         }
 
-        foreach (var sky in Utilities.FindAllEntitiesByDesignerName<CSkyCamera>("sky_camera"))
-        {
-            if (!sky.IsValid || !_savedSkyCameraFog.TryGetValue(sky.Index, out var saved))
-                continue;
-
-            var fog = sky.SkyboxData.Fog;
-            fog.Enable = saved.Enable;
-            fog.Start = saved.Start;
-            fog.End = saved.End;
-            fog.Maxdensity = saved.Maxdensity;
-            SetSkyboxFogFactor(fog, saved.SkyboxFogFactor);
-            MarkSkyCameraFogChanged(sky);
-        }
-
         ClearSavedState();
     }
 
@@ -270,12 +235,6 @@ public class CS2NoFogPlugin : BasePlugin
             Utilities.SetStateChanged(entity, className, fieldName,
                 extraOffset + Schema.GetSchemaOffset("fogparams_t", field));
         }
-    }
-
-    private static void MarkSkyCameraFogChanged(CSkyCamera sky)
-    {
-        MarkFogparamsChanged(sky, "CSkyCamera", "m_skyboxData",
-            Schema.GetSchemaOffset("sky3dparams_t", "fog"));
     }
 
     // skyboxFogFactor is not surfaced as a typed property, so go through the
@@ -292,6 +251,5 @@ public class CS2NoFogPlugin : BasePlugin
         _savedGradientFog.Clear();
         _savedCubemapFogOpacity.Clear();
         _savedPlayerVisibility.Clear();
-        _savedSkyCameraFog.Clear();
     }
 }

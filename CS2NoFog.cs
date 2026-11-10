@@ -101,7 +101,7 @@ public class CS2NoFogPlugin : BasePlugin
     //    to black at a close default plane.
     //  - Deleting env_cubemap_fog (or setting it inactive) leaves the client's
     //    cubemap fog pass running with no texture source, which renders as solid
-    //    BLACK - the black wall at a fixed distance, and the black sky. Zeroing
+    //    black (a black wall at a fixed distance and a black sky). Zeroing
     //    its opacity blacks out skybox props instead (see CubemapFogStart), so
     //    the entity is kept fully active and only its distance ramp is moved.
     // Everything is neutralized in place with per-field dirty marking so the
